@@ -1,5 +1,7 @@
 # W Play
 
+[![CI](https://github.com/oscaroguledo/wplay/actions/workflows/ci.yml/badge.svg)](https://github.com/oscaroguledo/wplay/actions/workflows/ci.yml)
+![Version](https://img.shields.io/badge/Version-1.0.0-7d1524)
 ![Platform](https://img.shields.io/badge/Platform-Android%207.0%2B-3DDC84?logo=android&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-22.11%2B-5FA04E?logo=nodedotjs&logoColor=white)
 ![React Native](https://img.shields.io/badge/React%20Native-0.88.1-61DAFB?logo=react&logoColor=black)
@@ -10,6 +12,7 @@
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-2026.10.26-FF0000)
 ![ONNX Runtime](https://img.shields.io/badge/ONNX%20Runtime-1.32.0-005CED?logo=onnx&logoColor=white)
 ![Jest](https://img.shields.io/badge/Jest-29-C21325?logo=jest&logoColor=white)
+![Licence](https://img.shields.io/badge/Licence-MIT-blue)
 
 **W Play** is an Android music player and downloader. It fetches audio with a copy of yt-dlp that runs on the phone, converts it to a tagged MP3 with cover art, files it by genre, and plays it back with lock-screen and notification controls.
 
@@ -87,6 +90,7 @@ Everything happens on the device. There is no backend server, no account, and no
 | Layout | `react-native-safe-area-context` 5 (edge-to-edge) |
 | Testing | Jest 29 with the React Native preset |
 | Code quality | ESLint 8 (`@react-native/eslint-config`), Prettier 2.8, `tsc` |
+| CI/CD | GitHub Actions: checks and an Android build on every push; a signed release APK on every version tag |
 | Build | Gradle 9.4, Android Gradle Plugin from React Native; `minSdk` 24, `targetSdk` 36, `compileSdk` 37 |
 
 ---
@@ -270,15 +274,34 @@ npm run lint         # ESLint
 npm test             # Jest
 ```
 
-Automated coverage is thin: one Jest test renders the app with the native modules absent. The native code has no unit tests. Downloading, conversion, playback, the media session, genre detection and the song menu have been checked by hand on a physical device.
+Unit tests live in `__tests__/` and cover the logic that decides what the app shows:
 
-There is no CI yet.
+| Suite | Covers |
+| --- | --- |
+| `genres.test.ts` | Normalising genre names, finding genres in tags, turning the model's style scores into genres, multi-genre tracks |
+| `musicbrainz.test.ts` | Cleaning titles and artist names, and the lookup itself against a faked network: recording tags, the artist fallback, weak matches, failures |
+| `trackActions.test.ts` | The genre summary, the "about this track" rows, and sharing |
+| `theme.test.ts` | Time and size formatting |
+| `App.test.tsx` | The app renders with the native modules absent |
+
+The native Kotlin code has no unit tests. Downloading, conversion, playback, the media session, genre detection on the device and the song menu have been checked by hand on a physical phone.
+
+**Continuous integration.** [`ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and every pull request: type check, lint and tests, then an Android debug build to prove the native code compiles. The debug APK is kept as a build artifact for a week.
 
 ---
 
 ## Building and releasing
 
-**Debug build**, for development:
+### Versioning
+
+The version has one source: `"version"` in [`package.json`](package.json), in `MAJOR.MINOR.PATCH` form. The Android build reads it:
+
+- `versionName` is that string;
+- `versionCode` is derived from it (`1.4.2` becomes `10402`), so each release sorts above the one before. MINOR and PATCH must stay below 100.
+
+Changes are recorded in [`CHANGELOG.md`](CHANGELOG.md).
+
+### Debug build
 
 ```bash
 cd android
@@ -286,15 +309,56 @@ cd android
 ./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a   # phones only; smaller
 ```
 
-The APK is written to `android/app/build/outputs/apk/debug/`. A single-ABI debug build is about 145 MB, most of it the Python runtime, FFmpeg, ONNX Runtime and the genre model.
+The APK is written to `android/app/build/outputs/apk/debug/`. It needs the Metro server to run.
 
-**Release build.** The project still has the React Native template's release settings, which sign with the public debug keystore. Before distributing a release build:
+### Release build
 
-- generate your own keystore and point `signingConfigs.release` at it (see [Publishing to Google Play Store](https://reactnative.dev/docs/signed-apk-android));
-- build with `./gradlew assembleRelease` or `bundleRelease`;
-- decide what to do about the genre model's licence (see below) if the app will be sold or monetised.
+A release build contains its own JavaScript and runs without a computer. It must be signed with a private key that you keep: Android only installs an update if it is signed with the same key as the installed app.
 
-A release build has not been made or tested yet.
+1. Create a keystore once and keep it, and its passwords, somewhere safe and backed up:
+
+   ```bash
+   keytool -genkeypair -v -storetype PKCS12 -keystore android/app/wplay-release.keystore \
+     -alias wplay -keyalg RSA -keysize 2048 -validity 10000
+   ```
+
+2. Tell the build where it is, in `android/keystore.properties` (ignored by git):
+
+   ```properties
+   storeFile=app/wplay-release.keystore
+   storePassword=...
+   keyAlias=wplay
+   keyPassword=...
+   ```
+
+3. Build:
+
+   ```bash
+   cd android
+   ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+   ```
+
+   The APK is written to `android/app/build/outputs/apk/release/app-release.apk`.
+
+Without a keystore the release build still works but is signed with the public debug key and prints a warning. Never distribute such a build.
+
+> **Moving from a debug install to a release install wipes the app's data.** The two are signed with different keys, so Android refuses to update one with the other; the debug app has to be uninstalled first, which removes the library index, playlists and covers. The MP3 files in `Download/Music` stay on the phone.
+
+### Publishing a release
+
+1. Set the new version in `package.json` and add a section to `CHANGELOG.md`.
+2. Commit, then tag and push: `git tag v1.2.3 && git push origin v1.2.3`.
+
+[`release.yml`](.github/workflows/release.yml) checks that the tag matches `package.json`, builds the signed APK, and attaches it with its SHA-256 checksum to a GitHub Release whose notes are that version's changelog section.
+
+The workflow signs with the keystore from four repository secrets. Until they are set, it stops after the version check and builds nothing:
+
+```bash
+base64 -i android/app/wplay-release.keystore | gh secret set WPLAY_KEYSTORE_BASE64
+gh secret set WPLAY_KEYSTORE_PASSWORD
+gh secret set WPLAY_KEY_ALIAS
+gh secret set WPLAY_KEY_PASSWORD
+```
 
 ---
 
@@ -305,7 +369,7 @@ A release build has not been made or tested yet.
 - **Genres are best-effort.** See [Genre detection](#genre-detection).
 - **Search is local**: it searches the downloaded library, not the web.
 - **Lyrics are manual**: the app does not download them.
-- **No automated tests of the native code**, no CI, and no tested release build.
+- **No automated tests of the native code.**
 - **The repository includes binary assets** (an 18 MB model and a 3 MB yt-dlp wheel).
 
 ---
@@ -341,4 +405,6 @@ A release build has not been made or tested yet.
 
 ## Licence
 
-No licence has been chosen for this project's own code yet, so it is not open source: all rights are reserved by the author. Third-party components keep their own licences, listed above.
+W Play's own code is released under the [MIT Licence](LICENSE).
+
+That licence covers this project's code only. The bundled third-party components keep their own licences, listed above. In particular, the genre model is **non-commercial only** (CC BY-NC-SA 4.0), so the app as built here must not be sold or monetised while it includes that model.
