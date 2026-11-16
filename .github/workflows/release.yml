@@ -1,0 +1,80 @@
+name: Release
+
+# Pushing a tag like v1.2.3 builds the signed release APK and attaches it to a GitHub Release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish the release APK
+    runs-on: ubuntu-latest
+    env:
+      HAS_KEYSTORE: ${{ secrets.WPLAY_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches package.json
+        id: version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Without the signing secrets there is nothing safe to publish, so the job stops here.
+      - name: Explain how to enable signed releases
+        if: env.HAS_KEYSTORE != 'true'
+        run: |
+          echo "::notice::No signing secrets are set, so no APK was built. See 'Building and releasing' in the README."
+
+      - uses: actions/setup-node@v4
+        if: env.HAS_KEYSTORE == 'true'
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        if: env.HAS_KEYSTORE == 'true'
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        if: env.HAS_KEYSTORE == 'true'
+      - run: npm ci
+        if: env.HAS_KEYSTORE == 'true'
+
+      - name: Build the signed release APK
+        if: env.HAS_KEYSTORE == 'true'
+        working-directory: android
+        env:
+          WPLAY_KEYSTORE_BASE64: ${{ secrets.WPLAY_KEYSTORE_BASE64 }}
+          WPLAY_KEYSTORE_PASSWORD: ${{ secrets.WPLAY_KEYSTORE_PASSWORD }}
+          WPLAY_KEY_ALIAS: ${{ secrets.WPLAY_KEY_ALIAS }}
+          WPLAY_KEY_PASSWORD: ${{ secrets.WPLAY_KEY_PASSWORD }}
+        run: |
+          export WPLAY_KEYSTORE_FILE="$RUNNER_TEMP/wplay-release.keystore"
+          echo "$WPLAY_KEYSTORE_BASE64" | base64 --decode > "$WPLAY_KEYSTORE_FILE"
+          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon
+          rm -f "$WPLAY_KEYSTORE_FILE"
+
+      - name: Publish the GitHub Release
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          apk="wplay-v$VERSION-arm64-v8a.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "$apk"
+          sha256sum "$apk" > "$apk.sha256"
+          # The notes are this version's section of the changelog.
+          awk -v v="$VERSION" '$0 ~ "^## \\["v"\\]" {on=1; next} /^## \[/ {on=0} on' CHANGELOG.md > notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$apk" "$apk.sha256" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$apk" "$apk.sha256" --title "W Play $VERSION" --notes-file notes.md
+          fi
