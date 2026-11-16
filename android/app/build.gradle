@@ -72,6 +72,33 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+/**
+ * The app's version has one source: "version" in package.json (MAJOR.MINOR.PATCH).
+ * versionName is that string; versionCode is derived from it so every release sorts above the
+ * one before (1.4.2 -> 10402). MINOR and PATCH must therefore stay below 100.
+ */
+def packageJson = new groovy.json.JsonSlurper().parse(file("../../package.json"))
+def appVersionName = packageJson.version as String
+def versionParts = appVersionName.tokenize("-")[0].tokenize(".").collect { it as int }
+if (versionParts.size() != 3 || versionParts[1] > 99 || versionParts[2] > 99) {
+    throw new GradleException("package.json version must be MAJOR.MINOR.PATCH with MINOR and PATCH under 100, got '${appVersionName}'")
+}
+def appVersionCode = versionParts[0] * 10000 + versionParts[1] * 100 + versionParts[2]
+
+/**
+ * Release signing. The keystore and its passwords are read from android/keystore.properties
+ * (kept out of git) or, on CI, from WPLAY_* environment variables. Without either, release
+ * builds fall back to the public debug key so they still build, but such a build must not be
+ * distributed.
+ */
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file("keystore.properties")
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+def releaseStoreFile = System.getenv("WPLAY_KEYSTORE_FILE") ?: keystoreProps["storeFile"]
+def hasReleaseKey = releaseStoreFile != null && rootProject.file(releaseStoreFile).exists()
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -82,8 +109,8 @@ android {
         applicationId "com.wplay"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode appVersionCode
+        versionName appVersionName
     }
     signingConfigs {
         debug {
@@ -92,15 +119,24 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        if (hasReleaseKey) {
+            release {
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword System.getenv("WPLAY_KEYSTORE_PASSWORD") ?: keystoreProps["storePassword"]
+                keyAlias System.getenv("WPLAY_KEY_ALIAS") ?: keystoreProps["keyAlias"]
+                keyPassword System.getenv("WPLAY_KEY_PASSWORD") ?: keystoreProps["keyPassword"]
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            if (!hasReleaseKey) {
+                logger.warn("W Play: no release keystore configured; signing the release build with the DEBUG key. Do not distribute it.")
+            }
+            signingConfig hasReleaseKey ? signingConfigs.release : signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
